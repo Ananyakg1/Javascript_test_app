@@ -46,9 +46,8 @@ RUN apk update && \
     curl \
     && rm -rf /var/cache/apk/*
 
-# Create non-root user
-RUN addgroup -g 1001 -S nginx && \
-    adduser -S reactapp -u 1001 -G nginx
+# Create non-root user (nginx group already exists, so we'll use it)
+RUN adduser -S reactapp -u 1001 -G nginx
 
 # Remove default nginx content
 RUN rm -rf /usr/share/nginx/html/*
@@ -60,13 +59,14 @@ COPY --from=builder --chown=1001:1001 /app/build /usr/share/nginx/html
 RUN mkdir -p /etc/nginx/conf.d
 COPY --chown=1001:1001 nginx.conf /etc/nginx/conf.d/default.conf
 
-# Set proper permissions
-RUN chown -R 1001:1001 /usr/share/nginx/html && \
-    chown -R 1001:1001 /var/cache/nginx && \
-    chown -R 1001:1001 /var/log/nginx && \
-    chown -R 1001:1001 /etc/nginx/conf.d && \
+# Set proper permissions (get nginx group ID and use it)
+RUN NGINX_GID=$(getent group nginx | cut -d: -f3) && \
+    chown -R 1001:$NGINX_GID /usr/share/nginx/html && \
+    chown -R 1001:$NGINX_GID /var/cache/nginx && \
+    chown -R 1001:$NGINX_GID /var/log/nginx && \
+    chown -R 1001:$NGINX_GID /etc/nginx/conf.d && \
     touch /var/run/nginx.pid && \
-    chown -R 1001:1001 /var/run/nginx.pid
+    chown -R 1001:$NGINX_GID /var/run/nginx.pid
 
 # Create directories for nginx to run as non-root
 RUN mkdir -p /tmp/nginx && \
