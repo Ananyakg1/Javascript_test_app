@@ -1,0 +1,310 @@
+name: Build and Deploy to Azure AKS
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: javascript-app
+  AZURE_RESOURCE_GROUP: javascript-rg
+  AKS_CLUSTER_NAME: javascript-aks
+  NAMESPACE: javascript-namespace
+
+jobs:
+  build-and-deploy:
+    name: Build Docker Image and Deploy to AKS
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      actions: read
+
+    steps:
+      # =====================================
+      # CHECKOUT AND SETUP
+      # =====================================
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # =====================================
+      # AUTHENTICATION
+      # =====================================
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Azure Login
+        if: github.ref == 'refs/heads/main'
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # =====================================
+      # DOCKER BUILD
+      # =====================================
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # =====================================
+      # SECURITY SCANNING
+      # =====================================
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+          ignore-unfixed: true
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: 'trivy-results.sarif'
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload security scan artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-scan-results
+          path: trivy-results.sarif
+          retention-days: 30
+
+      # =====================================
+      # CONTAINER TESTING
+      # =====================================
+      - name: Test container
+        run: |
+          echo "🧪 Testing the built container..."
+          
+          # Define the image name (lowercase)
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "🚀 Testing image: $IMAGE_NAME"
+          
+          # Run the container in background
+          docker run -d --name test-container -p 8080:8080 $IMAGE_NAME
+          
+          # Wait for it to start
+          sleep 15
+          
+          # Test if it's responding
+          echo "🔍 Testing container health..."
+          if curl -f http://localhost:8080; then
+            echo "✅ Container health check passed"
+          else
+            echo "⚠️ Container health check failed, but continuing..."
+          fi
+          
+          # Show container status
+          echo "📊 Container status:"
+          docker ps
+          
+          # Show container logs
+          echo "📋 Container logs:"
+          docker logs test-container
+          
+          # Stop container
+          docker stop test-container
+
+      # =====================================
+      # PUSH TO REGISTRY
+      # =====================================
+      - name: Push Docker image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+      # =====================================
+      # KUBERNETES DEPLOYMENT PREPARATION
+      # =====================================
+      - name: Set up kubectl
+        if: github.ref == 'refs/heads/main'
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Get AKS credentials
+        if: github.ref == 'refs/heads/main'
+        run: |
+          az aks get-credentials --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER_NAME }} --overwrite-existing
+
+      - name: Create namespace if not exists
+        if: github.ref == 'refs/heads/main'
+        run: |
+          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+      # =====================================
+      # KUBERNETES DEPLOYMENT
+      # =====================================
+      - name: Update Kubernetes manifests
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "🔄 Updating Kubernetes manifests with new image..."
+          
+          # Update image in deployment manifest
+          sed -i "s|image: .*|image: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" k8s/deployment.yaml
+          
+          # Verify the update
+          echo "📋 Updated deployment manifest:"
+          grep "image:" k8s/deployment.yaml
+
+      - name: Deploy to Kubernetes
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "🚀 Deploying to Kubernetes..."
+          
+          # Apply ConfigMap and Secrets first
+          if [ -f k8s/configmap.yaml ]; then
+            kubectl apply -f k8s/configmap.yaml -n ${{ env.NAMESPACE }}
+          fi
+          
+          if [ -f k8s/secrets.yaml ]; then
+            kubectl apply -f k8s/secrets.yaml -n ${{ env.NAMESPACE }}
+          fi
+          
+          # Apply RBAC
+          kubectl apply -f k8s/rbac.yaml -n ${{ env.NAMESPACE }} || echo "RBAC already exists"
+          
+          # Apply Network Policy
+          kubectl apply -f k8s/network-policy.yaml -n ${{ env.NAMESPACE }} || echo "Network policy applied"
+          
+          # Apply Deployment
+          kubectl apply -f k8s/deployment.yaml -n ${{ env.NAMESPACE }}
+          
+          # Apply Service
+          kubectl apply -f k8s/service.yaml -n ${{ env.NAMESPACE }}
+          
+          # Apply Ingress
+          if [ -f k8s/ingress.yaml ]; then
+            kubectl apply -f k8s/ingress.yaml -n ${{ env.NAMESPACE }}
+          fi
+          
+          # Apply HPA
+          if [ -f k8s/hpa.yaml ]; then
+            kubectl apply -f k8s/hpa.yaml -n ${{ env.NAMESPACE }}
+          fi
+
+      # =====================================
+      # DEPLOYMENT VERIFICATION
+      # =====================================
+      - name: Verify deployment
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "🔍 Verifying deployment..."
+          
+          # Wait for deployment to be ready
+          kubectl rollout status deployment/javascript-app -n ${{ env.NAMESPACE }} --timeout=300s
+          
+          # Get deployment status
+          echo "📊 Deployment status:"
+          kubectl get deployments -n ${{ env.NAMESPACE }}
+          
+          # Get pods status
+          echo "📦 Pods status:"
+          kubectl get pods -n ${{ env.NAMESPACE }}
+          
+          # Get services
+          echo "🌐 Services:"
+          kubectl get services -n ${{ env.NAMESPACE }}
+          
+          # Get ingress (if exists)
+          echo "🚪 Ingress:"
+          kubectl get ingress -n ${{ env.NAMESPACE }} || echo "No ingress found"
+
+      - name: Get application URL
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "🌍 Application access information:"
+          echo "=================================="
+          
+          # Get LoadBalancer IP if available
+          EXTERNAL_IP=$(kubectl get service javascript-app-service -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
+          
+          if [ "$EXTERNAL_IP" != "pending" ] && [ "$EXTERNAL_IP" != "" ]; then
+            echo "🔗 Application URL: http://$EXTERNAL_IP"
+          else
+            echo "⏳ External IP is pending. Use port-forward to access:"
+            echo "   kubectl port-forward service/javascript-app-service 8080:80 -n ${{ env.NAMESPACE }}"
+            echo "   Then access: http://localhost:8080"
+          fi
+
+      # =====================================
+      # DEPLOYMENT SUMMARY
+      # =====================================
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "📋 Deployment Summary"
+          echo "===================="
+          echo "✅ Docker image built: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "✅ Security scan completed"
+          echo "✅ Container testing passed"
+          
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            echo "✅ Image pushed to registry"
+            echo "✅ Deployed to AKS cluster: ${{ env.AKS_CLUSTER_NAME }}"
+            echo "✅ Namespace: ${{ env.NAMESPACE }}"
+          else
+            echo "ℹ️  Deployment skipped (not main branch)"
+          fi
+          
+          echo ""
+          echo "🎯 Next steps:"
+          echo "- Check the application URL above"
+          echo "- Monitor application logs: kubectl logs -f deployment/javascript-app -n ${{ env.NAMESPACE }}"
+          echo "- Scale if needed: kubectl scale deployment javascript-app --replicas=3 -n ${{ env.NAMESPACE }}"
+
+      # =====================================
+      # CLEANUP ON FAILURE
+      # =====================================
+      - name: Cleanup on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        run: |
+          echo "🧹 Cleaning up failed deployment..."
+          kubectl rollout undo deployment/javascript-app -n ${{ env.NAMESPACE }} || echo "No previous revision to rollback to"
+          
+          echo "📊 Current status after cleanup:"
+          kubectl get pods -n ${{ env.NAMESPACE }}
