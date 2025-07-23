@@ -21,8 +21,13 @@ WORKDIR /app
 # Copy package files first (better Docker layer caching)
 COPY package*.json ./
 
-# Install dependencies with security audit
-RUN npm ci --only=production --no-audit --no-fund && \
+# Install ALL dependencies (including dev dependencies for build)
+# Use npm ci if package-lock.json exists, otherwise use npm install
+RUN if [ -f package-lock.json ]; then \
+        npm ci --no-audit --no-fund; \
+    else \
+        npm install --no-audit --no-fund; \
+    fi && \
     npm audit fix --force || true && \
     npm cache clean --force
 
