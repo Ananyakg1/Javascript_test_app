@@ -80,8 +80,28 @@ jobs:
       # =====================================
       # SECURITY SCANNING
       # =====================================
-      - name: Run Trivy vulnerability scanner
+      - name: Run Trivy vulnerability scanner (Table format)
         uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+          ignore-unfixed: true
+
+      - name: Run Trivy vulnerability scanner (JSON format)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'json'
+          output: 'trivy-results.json'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+          ignore-unfixed: true
+
+      - name: Run Trivy vulnerability scanner (SARIF format - for GitHub Advanced Security)
+        uses: aquasecurity/trivy-action@0.28.0
+        continue-on-error: true
         with:
           image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           format: 'sarif'
@@ -90,7 +110,7 @@ jobs:
           exit-code: '0'
           ignore-unfixed: true
 
-      - name: Upload Trivy scan results
+      - name: Upload Trivy scan results to GitHub Security (if available)
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         continue-on-error: true
@@ -98,13 +118,85 @@ jobs:
           sarif_file: 'trivy-results.sarif'
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Process security scan results
+        if: always()
+        run: |
+          echo "🔍 Security Scan Results Summary"
+          echo "================================"
+          
+          # Check if JSON results exist and process them
+          if [ -f "trivy-results.json" ]; then
+            echo "📊 Vulnerability Statistics:"
+            
+            # Count vulnerabilities by severity
+            CRITICAL=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") | .VulnerabilityID' | wc -l || echo "0")
+            HIGH=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") | .VulnerabilityID' | wc -l || echo "0")
+            MEDIUM=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM") | .VulnerabilityID' | wc -l || echo "0")
+            LOW=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW") | .VulnerabilityID' | wc -l || echo "0")
+            
+            echo "🔴 Critical: $CRITICAL"
+            echo "🟠 High: $HIGH"
+            echo "🟡 Medium: $MEDIUM"
+            echo "🟢 Low: $LOW"
+            
+            # Set warning if critical or high vulnerabilities found
+            if [ "$CRITICAL" -gt "0" ] || [ "$HIGH" -gt "0" ]; then
+              echo "⚠️ WARNING: Critical or High severity vulnerabilities found!"
+              echo "::warning::Found $CRITICAL critical and $HIGH high severity vulnerabilities"
+            else
+              echo "✅ No critical or high severity vulnerabilities found"
+            fi
+            
+            # Show top 5 critical/high vulnerabilities if any
+            if [ "$CRITICAL" -gt "0" ] || [ "$HIGH" -gt "0" ]; then
+              echo ""
+              echo "🔍 Top Critical/High Vulnerabilities:"
+              cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH") | "- \(.VulnerabilityID): \(.Title // "No title") (\(.Severity))"' | head -5
+            fi
+          else
+            echo "⚠️ JSON results not available, check table output above"
+          fi
+          
+          echo ""
+          echo "📋 Security Scan Files Generated:"
+          ls -la trivy-results.* 2>/dev/null || echo "No scan result files found"
+
       - name: Upload security scan artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: security-scan-results
-          path: trivy-results.sarif
+          name: security-scan-results-${{ github.sha }}
+          path: |
+            trivy-results.json
+            trivy-results.sarif
           retention-days: 30
+
+      - name: Create security summary
+        if: always()
+        run: |
+          echo "## 🔒 Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f "trivy-results.json" ]; then
+            # Count vulnerabilities
+            CRITICAL=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") | .VulnerabilityID' | wc -l || echo "0")
+            HIGH=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") | .VulnerabilityID' | wc -l || echo "0")
+            
+            echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Critical | $CRITICAL |" >> $GITHUB_STEP_SUMMARY
+            echo "| High | $HIGH |" >> $GITHUB_STEP_SUMMARY
+            
+            if [ "$CRITICAL" -gt "0" ] || [ "$HIGH" -gt "0" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "⚠️ **Action Required**: Critical or High severity vulnerabilities detected!" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "✅ **Security Status**: No critical or high severity vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "Security scan completed - check build logs for details" >> $GITHUB_STEP_SUMMARY
+          fi
 
       # =====================================
       # CONTAINER TESTING

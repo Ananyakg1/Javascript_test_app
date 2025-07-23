@@ -1,0 +1,297 @@
+name: Security Scan
+
+on:
+  schedule:
+    # Run security scan daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to scan (default: latest)'
+        required: false
+        default: 'latest'
+        type: string
+      severity_filter:
+        description: 'Severity levels to include'
+        required: false
+        default: 'CRITICAL,HIGH'
+        type: choice
+        options:
+          - 'CRITICAL'
+          - 'CRITICAL,HIGH'
+          - 'CRITICAL,HIGH,MEDIUM'
+          - 'ALL'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: javascript-app
+
+jobs:
+  security-scan:
+    name: Security Vulnerability Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+      actions: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set scan parameters
+        id: params
+        run: |
+          # Set image tag
+          IMAGE_TAG="${{ github.event.inputs.image_tag || 'latest' }}"
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          
+          # Set severity filter
+          SEVERITY="${{ github.event.inputs.severity_filter || 'CRITICAL,HIGH' }}"
+          if [ "$SEVERITY" = "ALL" ]; then
+            SEVERITY="CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN"
+          fi
+          echo "severity=$SEVERITY" >> $GITHUB_OUTPUT
+          
+          # Construct full image name
+          FULL_IMAGE="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG"
+          echo "full_image=$FULL_IMAGE" >> $GITHUB_OUTPUT
+          
+          echo "🔍 Scanning image: $FULL_IMAGE"
+          echo "📊 Severity filter: $SEVERITY"
+
+      - name: Run comprehensive security scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.params.outputs.full_image }}
+          format: 'table'
+          severity: ${{ steps.params.outputs.severity }}
+          exit-code: '0'
+
+      - name: Generate JSON report
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.params.outputs.full_image }}
+          format: 'json'
+          output: 'trivy-report.json'
+          severity: ${{ steps.params.outputs.severity }}
+          exit-code: '0'
+
+      - name: Generate SARIF report (for GitHub Advanced Security)
+        uses: aquasecurity/trivy-action@0.28.0
+        continue-on-error: true
+        with:
+          image-ref: ${{ steps.params.outputs.full_image }}
+          format: 'sarif'
+          output: 'trivy-report.sarif'
+          severity: ${{ steps.params.outputs.severity }}
+          exit-code: '0'
+
+      - name: Generate HTML report
+        uses: aquasecurity/trivy-action@0.28.0
+        continue-on-error: true
+        with:
+          image-ref: ${{ steps.params.outputs.full_image }}
+          format: 'template'
+          template: '@/contrib/html.tpl'
+          output: 'trivy-report.html'
+          severity: ${{ steps.params.outputs.severity }}
+          exit-code: '0'
+
+      - name: Upload SARIF to GitHub Security (if supported)
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: 'trivy-report.sarif'
+
+      - name: Analyze scan results
+        if: always()
+        run: |
+          echo "🔒 Security Scan Analysis"
+          echo "========================="
+          
+          if [ -f "trivy-report.json" ]; then
+            echo "📊 Detailed Vulnerability Analysis:"
+            
+            # Extract vulnerability statistics
+            CRITICAL=$(cat trivy-report.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") | .VulnerabilityID' | wc -l || echo "0")
+            HIGH=$(cat trivy-report.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") | .VulnerabilityID' | wc -l || echo "0")
+            MEDIUM=$(cat trivy-report.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM") | .VulnerabilityID' | wc -l || echo "0")
+            LOW=$(cat trivy-report.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW") | .VulnerabilityID' | wc -l || echo "0")
+            UNKNOWN=$(cat trivy-report.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="UNKNOWN") | .VulnerabilityID' | wc -l || echo "0")
+            
+            TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW + UNKNOWN))
+            
+            echo "🔴 Critical: $CRITICAL"
+            echo "🟠 High: $HIGH"
+            echo "🟡 Medium: $MEDIUM"
+            echo "🟢 Low: $LOW"
+            echo "⚪ Unknown: $UNKNOWN"
+            echo "📈 Total: $TOTAL"
+            
+            # Set environment variables for later steps
+            echo "VULN_CRITICAL=$CRITICAL" >> $GITHUB_ENV
+            echo "VULN_HIGH=$HIGH" >> $GITHUB_ENV
+            echo "VULN_MEDIUM=$MEDIUM" >> $GITHUB_ENV
+            echo "VULN_LOW=$LOW" >> $GITHUB_ENV
+            echo "VULN_TOTAL=$TOTAL" >> $GITHUB_ENV
+            
+            # Generate detailed vulnerability list
+            if [ "$TOTAL" -gt "0" ]; then
+              echo ""
+              echo "🔍 Vulnerability Details:"
+              echo "========================"
+              
+              # Show critical vulnerabilities
+              if [ "$CRITICAL" -gt "0" ]; then
+                echo ""
+                echo "🔴 CRITICAL Vulnerabilities:"
+                cat trivy-report.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") | "- \(.VulnerabilityID): \(.Title // "No title") (Fixed: \(.FixedVersion // "Not available"))"'
+              fi
+              
+              # Show high vulnerabilities (limit to 10)
+              if [ "$HIGH" -gt "0" ]; then
+                echo ""
+                echo "🟠 HIGH Vulnerabilities (top 10):"
+                cat trivy-report.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") | "- \(.VulnerabilityID): \(.Title // "No title") (Fixed: \(.FixedVersion // "Not available"))"' | head -10
+              fi
+            else
+              echo "✅ No vulnerabilities found with the specified severity levels!"
+            fi
+            
+            # Package-level analysis
+            echo ""
+            echo "📦 Vulnerable Packages:"
+            cat trivy-report.json | jq -r '.Results[]? | select(.Vulnerabilities) | "Target: \(.Target), Packages with vulnerabilities: \(.Vulnerabilities | length)"'
+            
+          else
+            echo "❌ JSON report not generated. Check scan logs above."
+          fi
+
+      - name: Generate security badge data
+        if: always()
+        run: |
+          # Create a simple JSON file with security status for potential badge generation
+          cat > security-status.json << EOF
+          {
+            "schemaVersion": 1,
+            "label": "security",
+            "message": "$(if [ "${VULN_CRITICAL:-0}" -gt "0" ] || [ "${VULN_HIGH:-0}" -gt "0" ]; then echo "${VULN_CRITICAL:-0} critical, ${VULN_HIGH:-0} high"; else echo "no issues"; fi)",
+            "color": "$(if [ "${VULN_CRITICAL:-0}" -gt "0" ]; then echo "red"; elif [ "${VULN_HIGH:-0}" -gt "0" ]; then echo "orange"; else echo "green"; fi)",
+            "namedLogo": "security",
+            "logoColor": "white"
+          }
+          EOF
+          
+          echo "🏷️ Security badge data generated:"
+          cat security-status.json
+
+      - name: Create comprehensive summary
+        if: always()
+        run: |
+          # Generate GitHub Step Summary
+          cat > $GITHUB_STEP_SUMMARY << 'EOF'
+          ## 🔒 Security Scan Report
+          
+          ### Scan Details
+          - **Image**: `${{ steps.params.outputs.full_image }}`
+          - **Severity Filter**: `${{ steps.params.outputs.severity }}`
+          - **Scan Time**: `$(date -u +'%Y-%m-%d %H:%M:%S UTC')`
+          
+          ### Vulnerability Summary
+          | Severity | Count | Status |
+          |----------|-------|---------|
+          | 🔴 Critical | $(echo ${VULN_CRITICAL:-0}) | $(if [ "${VULN_CRITICAL:-0}" -gt "0" ]; then echo "⚠️ Action Required"; else echo "✅ Clean"; fi) |
+          | 🟠 High | $(echo ${VULN_HIGH:-0}) | $(if [ "${VULN_HIGH:-0}" -gt "0" ]; then echo "⚠️ Review Needed"; else echo "✅ Clean"; fi) |
+          | 🟡 Medium | $(echo ${VULN_MEDIUM:-0}) | $(if [ "${VULN_MEDIUM:-0}" -gt "0" ]; then echo "📋 Monitor"; else echo "✅ Clean"; fi) |
+          | 🟢 Low | $(echo ${VULN_LOW:-0}) | ℹ️ Informational |
+          | **Total** | **$(echo ${VULN_TOTAL:-0})** | |
+          
+          ### Security Status
+          $(if [ "${VULN_CRITICAL:-0}" -gt "0" ]; then
+            echo "🚨 **CRITICAL ALERT**: Immediate action required to address critical vulnerabilities!"
+          elif [ "${VULN_HIGH:-0}" -gt "0" ]; then
+            echo "⚠️ **HIGH PRIORITY**: High severity vulnerabilities detected - review and update recommended"
+          elif [ "${VULN_MEDIUM:-0}" -gt "0" ]; then
+            echo "📋 **MEDIUM PRIORITY**: Medium severity vulnerabilities detected - monitor and plan updates"
+          else
+            echo "✅ **SECURE**: No critical, high, or medium severity vulnerabilities detected"
+          fi)
+          
+          ### Recommendations
+          $(if [ "${VULN_TOTAL:-0}" -gt "0" ]; then
+            echo "- 📥 Download detailed reports from artifacts"
+            echo "- 🔄 Update base images and dependencies"
+            echo "- 🔍 Review vulnerability details in the HTML report"
+            echo "- 📅 Schedule regular security scans"
+          else
+            echo "- ✅ Maintain current security practices"
+            echo "- 📅 Continue regular security scanning"
+            echo "- 🔄 Keep dependencies updated"
+          fi)
+          
+          ### Available Reports
+          - 📊 JSON Report: `trivy-report.json`
+          - 📋 SARIF Report: `trivy-report.sarif` (for GitHub Security)
+          - 🌐 HTML Report: `trivy-report.html` (human-readable)
+          - 🏷️ Security Badge: `security-status.json`
+          EOF
+
+      - name: Upload comprehensive scan reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-scan-reports-${{ steps.params.outputs.image_tag }}-${{ github.run_number }}
+          path: |
+            trivy-report.json
+            trivy-report.sarif
+            trivy-report.html
+            security-status.json
+          retention-days: 90
+
+      - name: Check security threshold
+        if: always()
+        run: |
+          # Set security thresholds
+          MAX_CRITICAL=0
+          MAX_HIGH=5
+          
+          echo "🎯 Security Threshold Check"
+          echo "=========================="
+          echo "Max allowed - Critical: $MAX_CRITICAL, High: $MAX_HIGH"
+          echo "Found - Critical: ${VULN_CRITICAL:-0}, High: ${VULN_HIGH:-0}"
+          
+          if [ "${VULN_CRITICAL:-0}" -gt "$MAX_CRITICAL" ]; then
+            echo "❌ FAILED: Critical vulnerabilities exceed threshold ($MAX_CRITICAL)"
+            echo "::error::Critical vulnerabilities found: ${VULN_CRITICAL:-0} (max allowed: $MAX_CRITICAL)"
+            exit 1
+          elif [ "${VULN_HIGH:-0}" -gt "$MAX_HIGH" ]; then
+            echo "⚠️ WARNING: High vulnerabilities exceed threshold ($MAX_HIGH)"
+            echo "::warning::High vulnerabilities found: ${VULN_HIGH:-0} (max allowed: $MAX_HIGH)"
+          else
+            echo "✅ PASSED: Vulnerabilities within acceptable thresholds"
+          fi
+
+      - name: Notify on critical findings
+        if: always()
+        run: |
+          if [ "${VULN_CRITICAL:-0}" -gt "0" ]; then
+            echo "🚨 CRITICAL SECURITY ALERT"
+            echo "========================="
+            echo "Critical vulnerabilities detected in the container image!"
+            echo "Image: ${{ steps.params.outputs.full_image }}"
+            echo "Critical Count: ${VULN_CRITICAL}"
+            echo ""
+            echo "Immediate action required:"
+            echo "1. Review the detailed scan results"
+            echo "2. Update vulnerable packages"
+            echo "3. Rebuild and redeploy the image"
+            echo "4. Verify the fixes with another scan"
+            
+            # You can add additional notification steps here
+            # For example: Slack notifications, email alerts, etc.
+          else
+            echo "✅ No critical vulnerabilities found"
+          fi
