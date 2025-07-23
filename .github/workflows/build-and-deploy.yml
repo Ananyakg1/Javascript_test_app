@@ -139,19 +139,21 @@ jobs:
             echo "🟡 Medium: $MEDIUM"
             echo "🟢 Low: $LOW"
             
-            # Set warning if critical or high vulnerabilities found
-            if [ "$CRITICAL" -gt "0" ] || [ "$HIGH" -gt "0" ]; then
-              echo "⚠️ WARNING: Critical or High severity vulnerabilities found!"
-              echo "::warning::Found $CRITICAL critical and $HIGH high severity vulnerabilities"
-            else
-              echo "✅ No critical or high severity vulnerabilities found"
+            # Fail the build if critical vulnerabilities found
+            if [ "$CRITICAL" -gt "0" ]; then
+              echo "::error::Found $CRITICAL critical severity vulnerabilities. Failing the build."
+              echo "🔍 Top Critical Vulnerabilities:"
+              cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") | "- \(.VulnerabilityID): \(.Title // "No title") (\(.Severity))"' | head -5
+              exit 1
             fi
-            
-            # Show top 5 critical/high vulnerabilities if any
-            if [ "$CRITICAL" -gt "0" ] || [ "$HIGH" -gt "0" ]; then
-              echo ""
-              echo "🔍 Top Critical/High Vulnerabilities:"
-              cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH") | "- \(.VulnerabilityID): \(.Title // "No title") (\(.Severity))"' | head -5
+            # Warn if high vulnerabilities found
+            if [ "$HIGH" -gt "0" ]; then
+              echo "::warning::Found $HIGH high severity vulnerabilities."
+              echo "🔍 Top High Vulnerabilities:"
+              cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") | "- \(.VulnerabilityID): \(.Title // "No title") (\(.Severity))"' | head -5
+            fi
+            if [ "$CRITICAL" -eq "0" ] && [ "$HIGH" -eq "0" ]; then
+              echo "✅ No critical or high severity vulnerabilities found"
             fi
           else
             echo "⚠️ JSON results not available, check table output above"
