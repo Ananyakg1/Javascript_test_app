@@ -1,0 +1,75 @@
+# Docker Security Configuration
+
+# Environment-specific Docker Compose file for secure deployment
+version: '3.8'
+
+services:
+  material-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: material-dashboard-react:secure
+    container_name: material-dashboard-secure
+    
+    # Security configurations
+    user: "1001:1001"
+    read_only: true
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    
+    # Capabilities
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    
+    # Temporary file systems
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=100m
+      - /var/cache/nginx:rw,noexec,nosuid,size=50m
+      - /var/run:rw,noexec,nosuid,size=50m
+    
+    # Port mapping (non-privileged port)
+    ports:
+      - "8080:8080"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Labels for monitoring
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`dashboard.yourdomain.com`)"
+      - "traefik.http.routers.dashboard.tls=true"
+      - "security.scan=enabled"
+      - "backup.enabled=false"
+
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_icc: 'false'
+      com.docker.network.bridge.enable_ip_masquerade: 'true'

@@ -1,0 +1,86 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: javascript-app-kustomization
+  namespace: javascript-namespace
+
+# Common labels applied to all resources
+commonLabels:
+  app: javascript-app
+  environment: production
+  managed-by: kustomize
+
+# Common annotations applied to all resources
+commonAnnotations:
+  deployment.timestamp: "2025-07-23"
+  security.policy: "restricted"
+  monitoring.enabled: "true"
+
+# Namespace to deploy all resources
+namespace: javascript-namespace
+
+# Resources to include in the deployment
+resources:
+- namespace.yaml
+- configmap.yaml
+- secrets-rbac.yaml
+- deployment.yaml
+- service.yaml
+- network-policy.yaml
+- policies.yaml
+- ingress.yaml
+- monitoring.yaml
+
+# Images to update (for CI/CD pipeline)
+images:
+- name: javascript-app
+  newTag: latest
+
+# ConfigMap generator for additional configuration
+configMapGenerator:
+- name: javascript-app-env
+  literals:
+  - DEPLOY_TIMESTAMP="2025-07-23T00:00:00Z"
+  - KUSTOMIZE_VERSION="v5.0.0"
+  - DEPLOYMENT_ID="prod-001"
+
+# Secret generator for sensitive data
+secretGenerator:
+- name: javascript-app-runtime-secrets
+  literals:
+  - DEPLOYMENT_KEY="deployment-secret-key"
+  type: Opaque
+
+# Patches for environment-specific customizations
+patches:
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: javascript-app-deployment
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 3
+    - op: replace
+      path: /spec/template/spec/containers/0/image
+      value: javascript-app:latest
+
+# Resource transformers
+replicas:
+- name: javascript-app-deployment
+  count: 3
+
+# Name prefix for all resources
+namePrefix: ""
+
+# Name suffix for all resources
+nameSuffix: ""
+
+# Labels to add to all selectors
+labels:
+- includeSelectors: true
+  pairs:
+    environment: production
+    security-tier: frontend

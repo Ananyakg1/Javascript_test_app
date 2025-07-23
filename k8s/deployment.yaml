@@ -1,0 +1,234 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: javascript-app-deployment
+  namespace: javascript-namespace
+  labels:
+    app: javascript-app
+    version: v1
+    environment: production
+    tier: frontend
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+    security.policy: "restricted"
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: javascript-app
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: javascript-app
+        version: v1
+        environment: production
+        tier: frontend
+      annotations:
+        # Security annotations
+        container.apparmor.security.beta.kubernetes.io/javascript-app: runtime/default
+        seccomp.security.alpha.kubernetes.io/pod: runtime/default
+        # Prometheus monitoring
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: javascript-app-sa
+      automountServiceAccountToken: false
+      
+      # Security context for the pod
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        fsGroupChangePolicy: "OnRootMismatch"
+        seccompProfile:
+          type: RuntimeDefault
+        supplementalGroups: [1001]
+      
+      # Anti-affinity to spread pods across nodes
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - javascript-app
+              topologyKey: kubernetes.io/hostname
+      
+      # Node selector for production nodes
+      nodeSelector:
+        kubernetes.io/os: linux
+        node-type: production
+      
+      # Tolerations (if needed)
+      tolerations:
+      - key: "production"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+      
+      # DNS configuration
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "2"
+        - name: edns0
+      
+      containers:
+      - name: javascript-app
+        image: javascript-app:latest
+        imagePullPolicy: Always
+        
+        # Security context for the container
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+          runAsGroup: 1001
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - CHOWN
+            - SETGID
+            - SETUID
+          seccompProfile:
+            type: RuntimeDefault
+        
+        # Port configuration
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        
+        # Environment variables from ConfigMap and Secrets
+        env:
+        - name: NODE_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: javascript-app-config
+              key: NODE_ENV
+        - name: PORT
+          valueFrom:
+            configMapKeyRef:
+              name: javascript-app-config
+              key: PORT
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: javascript-app-config
+              key: ENVIRONMENT
+        - name: SESSION_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: javascript-app-secrets
+              key: SESSION_SECRET
+        
+        envFrom:
+        - configMapRef:
+            name: javascript-app-config
+        
+        # Resource limits and requests
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+            ephemeral-storage: 1Gi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+            ephemeral-storage: 2Gi
+        
+        # Volume mounts
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+        - name: var-cache-volume
+          mountPath: /var/cache/nginx
+        - name: var-run-volume
+          mountPath: /var/run
+        - name: nginx-config
+          mountPath: /etc/nginx/conf.d/default.conf
+          subPath: nginx.conf
+          readOnly: true
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        
+        # Startup probe for slow-starting containers
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 30
+        
+        # Lifecycle hooks
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - sleep 15
+      
+      # Volumes
+      volumes:
+      - name: tmp-volume
+        emptyDir:
+          sizeLimit: 100Mi
+      - name: var-cache-volume
+        emptyDir:
+          sizeLimit: 50Mi
+      - name: var-run-volume
+        emptyDir:
+          sizeLimit: 50Mi
+      - name: nginx-config
+        configMap:
+          name: javascript-app-config
+          items:
+          - key: nginx.conf
+            path: nginx.conf
+      
+      # Termination grace period
+      terminationGracePeriodSeconds: 30
+      
+      # Restart policy
+      restartPolicy: Always

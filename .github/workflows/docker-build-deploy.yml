@@ -1,0 +1,331 @@
+name: Build and Deploy Secure Docker Image to Kubernetes
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/javascript-app
+  KUBE_NAMESPACE: javascript-namespace
+
+jobs:
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run security audit
+        run: |
+          npm audit --audit-level=critical
+          npm audit fix --dry-run
+
+      - name: Run ESLint security scan
+        run: npx eslint . --ext .js,.jsx,.ts,.tsx --max-warnings 0 || true
+
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: security-scan
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Docker Scout vulnerability scan
+        uses: docker/scout-action@v1
+        if: github.event_name != 'pull_request'
+        with:
+          command: cves
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          only-severities: critical,high
+          exit-code: true
+
+      - name: Push Docker image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  kubernetes-security-scan:
+    name: Kubernetes Security Scan
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Validate Kubernetes manifests
+        run: |
+          # Validate YAML syntax
+          for file in k8s/*.yaml; do
+            echo "Validating $file"
+            kubectl apply --dry-run=client -f "$file" || exit 1
+          done
+
+      - name: Run kustomize build
+        run: |
+          cd k8s
+          kustomize build . > ../manifests.yaml
+          echo "Generated manifests:"
+          cat ../manifests.yaml
+
+      - name: Security scan with kubesec
+        run: |
+          curl -sSX POST --data-binary @manifests.yaml \
+            https://v2.kubesec.io/scan | jq .
+
+      - name: Install and run kube-score
+        run: |
+          wget https://github.com/zegl/kube-score/releases/download/v1.16.1/kube-score_1.16.1_linux_amd64.tar.gz
+          tar xzf kube-score_1.16.1_linux_amd64.tar.gz
+          ./kube-score score manifests.yaml
+
+      - name: Run Polaris security audit
+        run: |
+          wget https://github.com/FairwindsOps/polaris/releases/download/8.5.0/polaris_linux_amd64.tar.gz
+          tar xzf polaris_linux_amd64.tar.gz
+          ./polaris audit --format=json --audit-path=manifests.yaml | jq .
+
+      - name: Upload Kubernetes manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubernetes-manifests
+          path: manifests.yaml
+          retention-days: 30
+
+  security-baseline:
+    name: Security Baseline Check
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Docker Bench Security
+        run: |
+          docker run --rm --net host --pid host --userns host --cap-add audit_control \
+            -e DOCKER_CONTENT_TRUST=$DOCKER_CONTENT_TRUST \
+            -v /etc:/etc:ro \
+            -v /lib/systemd/system:/lib/systemd/system:ro \
+            -v /usr/bin/containerd:/usr/bin/containerd:ro \
+            -v /usr/bin/runc:/usr/bin/runc:ro \
+            -v /usr/lib/systemd:/usr/lib/systemd:ro \
+            -v /var/lib:/var/lib:ro \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            --label docker_bench_security \
+            docker/docker-bench-security || true
+
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: [build-and-push, security-baseline, kubernetes-security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Configure kubectl (replace with your cluster config)
+        run: |
+          # Replace this with your actual cluster configuration
+          echo "Setting up kubectl configuration..."
+          # Example for different cloud providers:
+          
+          # For AWS EKS:
+          # aws eks update-kubeconfig --region ${{ secrets.AWS_REGION }} --name ${{ secrets.EKS_CLUSTER_NAME }}
+          
+          # For Google GKE:
+          # gcloud container clusters get-credentials ${{ secrets.GKE_CLUSTER_NAME }} --zone ${{ secrets.GKE_ZONE }} --project ${{ secrets.GCP_PROJECT }}
+          
+          # For Azure AKS:
+          # az aks get-credentials --resource-group ${{ secrets.AKS_RESOURCE_GROUP }} --name ${{ secrets.AKS_CLUSTER_NAME }}
+          
+          # For local/self-managed clusters:
+          # echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+          
+          echo "Kubectl configuration completed"
+
+      - name: Update image tag in kustomization
+        run: |
+          cd k8s
+          # Update the image tag to the current commit SHA
+          kustomize edit set image javascript-app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Deploy to Kubernetes
+        run: |
+          cd k8s
+          
+          # Apply namespace first
+          kubectl apply -f namespace.yaml
+          
+          # Wait for namespace to be ready
+          kubectl wait --for=condition=Ready namespace/${{ env.KUBE_NAMESPACE }} --timeout=60s
+          
+          # Build and apply all manifests
+          kustomize build . | kubectl apply -f -
+          
+          # Verify deployment
+          kubectl rollout status deployment/javascript-app-deployment -n ${{ env.KUBE_NAMESPACE }} --timeout=300s
+
+      - name: Verify deployment health
+        run: |
+          echo "Checking deployment status..."
+          kubectl get pods -n ${{ env.KUBE_NAMESPACE }} -l app=javascript-app
+          
+          echo "Checking service status..."
+          kubectl get svc -n ${{ env.KUBE_NAMESPACE }} -l app=javascript-app
+          
+          echo "Checking ingress status..."
+          kubectl get ingress -n ${{ env.KUBE_NAMESPACE }}
+          
+          # Wait for pods to be ready
+          kubectl wait --for=condition=Ready pod -l app=javascript-app -n ${{ env.KUBE_NAMESPACE }} --timeout=300s
+          
+          # Test health endpoint
+          echo "Testing health endpoint..."
+          kubectl port-forward -n ${{ env.KUBE_NAMESPACE }} svc/javascript-app-service 8080:80 &
+          sleep 10
+          curl -f http://localhost:8080/health || exit 1
+          
+          echo "Deployment verification completed successfully!"
+
+      - name: Cleanup on failure
+        if: failure()
+        run: |
+          echo "Deployment failed, checking logs..."
+          kubectl logs -l app=javascript-app -n ${{ env.KUBE_NAMESPACE }} --tail=100
+          
+          echo "Describing failed pods..."
+          kubectl describe pods -l app=javascript-app -n ${{ env.KUBE_NAMESPACE }}
+          
+          # Optional: Rollback to previous version
+          # kubectl rollout undo deployment/javascript-app-deployment -n ${{ env.KUBE_NAMESPACE }}
+
+      - name: Post-deployment security scan
+        run: |
+          echo "Running post-deployment security checks..."
+          
+          # Check pod security context
+          kubectl get pods -n ${{ env.KUBE_NAMESPACE }} -l app=javascript-app -o jsonpath='{.items[*].spec.securityContext}'
+          
+          # Check network policies
+          kubectl get networkpolicies -n ${{ env.KUBE_NAMESPACE }}
+          
+          # Check resource limits
+          kubectl describe pods -n ${{ env.KUBE_NAMESPACE }} -l app=javascript-app | grep -A 5 "Limits\|Requests"
+          
+          echo "Security checks completed"
+
+      - name: Update deployment status
+        run: |
+          echo "Deployment completed successfully!"
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "Namespace: ${{ env.KUBE_NAMESPACE }}"
+          echo "Environment: production"
+          
+          # Optional: Send notification to Slack/Teams/etc.
+          # curl -X POST -H 'Content-type: application/json' \
+          #   --data '{"text":"JavaScript app deployed successfully to production"}' \
+          #   ${{ secrets.SLACK_WEBHOOK_URL }}

@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: javascript-app-monitoring
+  namespace: javascript-namespace
+  labels:
+    app: javascript-app
+    environment: production
+    monitoring: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: javascript-app
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+    scheme: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: javascript-app-alerts
+  namespace: javascript-namespace
+  labels:
+    app: javascript-app
+    environment: production
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+  - name: javascript-app.rules
+    rules:
+    - alert: JavaScriptAppDown
+      expr: up{job="javascript-app-monitoring"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        service: javascript-app
+      annotations:
+        summary: "JavaScript app is down"
+        description: "JavaScript app has been down for more than 1 minute"
+    
+    - alert: JavaScriptAppHighCPU
+      expr: rate(container_cpu_usage_seconds_total{pod=~"javascript-app-.*"}[5m]) > 0.8
+      for: 5m
+      labels:
+        severity: warning
+        service: javascript-app
+      annotations:
+        summary: "High CPU usage on JavaScript app"
+        description: "CPU usage is above 80% for more than 5 minutes"
+    
+    - alert: JavaScriptAppHighMemory
+      expr: container_memory_usage_bytes{pod=~"javascript-app-.*"} / container_spec_memory_limit_bytes > 0.9
+      for: 5m
+      labels:
+        severity: warning
+        service: javascript-app
+      annotations:
+        summary: "High memory usage on JavaScript app"
+        description: "Memory usage is above 90% for more than 5 minutes"
+    
+    - alert: JavaScriptAppPodCrashLooping
+      expr: rate(kube_pod_container_status_restarts_total{pod=~"javascript-app-.*"}[15m]) > 0
+      for: 5m
+      labels:
+        severity: critical
+        service: javascript-app
+      annotations:
+        summary: "JavaScript app pod is crash looping"
+        description: "Pod {{ $labels.pod }} is restarting frequently"
+    
+    - alert: JavaScriptAppHighErrorRate
+      expr: rate(nginx_http_requests_total{status=~"5.."}[5m]) / rate(nginx_http_requests_total[5m]) > 0.1
+      for: 2m
+      labels:
+        severity: warning
+        service: javascript-app
+      annotations:
+        summary: "High error rate on JavaScript app"
+        description: "Error rate is above 10% for more than 2 minutes"
