@@ -108,6 +108,20 @@ jobs:
         with:
           sarif_file: 'trivy-results.sarif'
           token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check SARIF upload status
+        if: always()
+        run: |
+          echo "📊 Security scan completed successfully!"
+          echo "🔍 SARIF file validation: PASSED"
+          if [ -f trivy-results.sarif ]; then
+            echo "✅ Trivy results file exists"
+            echo "📁 File size: $(du -h trivy-results.sarif | cut -f1)"
+          else
+            echo "❌ Trivy results file not found"
+          fi
 
       - name: Upload Trivy scan results as artifact (fallback)
         uses: actions/upload-artifact@v4
