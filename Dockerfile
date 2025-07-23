@@ -33,11 +33,17 @@ RUN if [ -f package-lock.json ]; then \
 # Copy source code
 COPY --chown=1001:1001 . .
 
-# Switch to non-root user for build
-USER 1001
+# Set build environment variables
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+ENV GENERATE_SOURCEMAP=false
+ENV CI=true
 
-# Build the application
-RUN npm run build
+# Build the application (stay as root for build process)
+RUN echo "Starting build process..." && \
+    npm --version && \
+    node --version && \
+    ls -la node_modules/.bin/react-scripts || echo "react-scripts not found in .bin" && \
+    npm run build
 
 # Remove source code and dev dependencies after build
 RUN rm -rf src/ public/ node_modules/
