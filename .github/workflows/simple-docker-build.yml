@@ -35,7 +35,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/javascript-app
           tags: |
             type=ref,event=branch
             type=sha,prefix={{branch}}-
@@ -61,21 +61,29 @@ jobs:
           # Install trivy locally
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
           
+          # Define the image name (lowercase)
+          IMAGE_NAME="ghcr.io/ananyakg1/javascript-app:${{ github.sha }}"
+          echo "📊 Scanning Docker image: $IMAGE_NAME"
+          
           # Scan the built image
-          echo "📊 Scanning Docker image for vulnerabilities..."
-          trivy image --severity HIGH,CRITICAL --format table ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ github.sha }} || echo "Scan completed with findings"
+          trivy image --severity HIGH,CRITICAL --format table $IMAGE_NAME || echo "Scan completed with findings"
 
       - name: Test container
         run: |
           echo "🧪 Testing the built container..."
           
+          # Define the image name (lowercase)
+          IMAGE_NAME="ghcr.io/ananyakg1/javascript-app:${{ github.sha }}"
+          echo "🚀 Testing image: $IMAGE_NAME"
+          
           # Run the container in background
-          docker run -d --name test-container -p 8080:8080 ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker run -d --name test-container -p 8080:8080 $IMAGE_NAME
           
           # Wait for it to start
-          sleep 10
+          sleep 15
           
           # Test if it's responding
+          echo "🔍 Testing container health..."
           curl -f http://localhost:8080 || echo "Container test completed"
           
           # Show container logs
