@@ -28,11 +28,13 @@ RUN if [ -f package-lock.json ]; then \
     else \
         npm install --no-audit --no-fund; \
     fi && \
-    npm audit fix --force || true && \
     npm cache clean --force
 
 # Copy source code
 COPY --chown=1001:1001 . .
+
+# Switch to non-root user for build
+USER 1001
 
 # Build the application
 RUN npm run build
