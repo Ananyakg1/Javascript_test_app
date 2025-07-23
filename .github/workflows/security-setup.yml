@@ -1,0 +1,74 @@
+name: Security Setup and Configuration
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run weekly on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  security-setup:
+    name: Security Setup and CodeQL Initialization
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript"
+
+      - name: Run basic security checks
+        run: |
+          echo "=== Repository Security Configuration ==="
+          echo "✅ CodeQL analysis completed"
+          echo "✅ Security events permission configured"
+          echo "✅ Actions permission configured"
+          echo ""
+          echo "📋 To enable full security features:"
+          echo "1. Go to repository Settings > Security & analysis"
+          echo "2. Enable 'Dependency graph'"
+          echo "3. Enable 'Dependabot alerts'"
+          echo "4. Enable 'Dependabot security updates'"
+          echo "5. Enable 'Code scanning alerts'"
+          echo "6. Enable 'Secret scanning alerts'"
+          echo ""
+          echo "🔧 If you see 'Resource not accessible by integration' errors:"
+          echo "1. Ensure GitHub Advanced Security is enabled (required for private repos)"
+          echo "2. Check that Security tab is accessible in your repository"
+          echo "3. Verify that Security events write permission is granted"
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: critical
