@@ -37,6 +37,7 @@ COPY --chown=1001:1001 . .
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 ENV GENERATE_SOURCEMAP=false
 ENV CI=true
+ENV SKIP_PREFLIGHT_CHECK=true
 
 # Build the application (stay as root for build process)
 RUN echo "Starting build process..." && \
