@@ -1,5 +1,11 @@
 name: Build and Deploy to Azure AKS
-
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build: 
@@ -15,10 +21,46 @@ jobs:
       contents: read
       packages: write
       actions: read
-    outputs:
-      image_tag: ${{ steps.meta.outputs.tags }}
     steps:
-      # ...existing code...
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - name: Scan Docker image for vulnerabilities
+        uses: aquasecurity/trivy-action@v0.13.1
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          format: table
+          exit-code: 0
+      - name: Push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
 
   deploy:
     name: Deploy to Azure AKS
@@ -31,157 +73,6 @@ jobs:
       AZURE_RESOURCE_GROUP: javascript-rg
       AKS_CLUSTER_NAME: javascript-aks
       NAMESPACE: javascript-namespace
-    permissions:
-      contents: read
-      packages: read
-      actions: read
-    steps:
-      # ...existing code...
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: javascript-app
-  AZURE_RESOURCE_GROUP: javascript-rg
-  AKS_CLUSTER_NAME: javascript-aks
-jobs:
-  build:
-    name: Build, Scan, and Test Docker Image
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      actions: read
-    outputs:
-      image_tag: ${{ steps.meta.outputs.tags }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable={{is_default_branch}}
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
-          push: false
-          load: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Run Trivy vulnerability scanner (Table format)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          format: 'table'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0'
-          ignore-unfixed: true
-      - name: Run Trivy vulnerability scanner (JSON format)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          format: 'json'
-          output: 'trivy-results.json'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0'
-          ignore-unfixed: true
-      # ...existing code...
-      - name: Process security scan results
-        if: always()
-        run: |
-          echo "🔍 Security Scan Results Summary"
-          echo "================================"
-          if [ -f "trivy-results.json" ]; then
-            echo "📊 Vulnerability Statistics:"
-            CRITICAL=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") | .VulnerabilityID' | wc -l || echo "0")
-            HIGH=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") | .VulnerabilityID' | wc -l || echo "0")
-            MEDIUM=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM") | .VulnerabilityID' | wc -l || echo "0")
-            LOW=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW") | .VulnerabilityID' | wc -l || echo "0")
-            echo "🔴 Critical: $CRITICAL"
-            echo "🟠 High: $HIGH"
-            echo "🟡 Medium: $MEDIUM"
-            echo "🟢 Low: $LOW"
-            if [ "$CRITICAL" -gt "0" ]; then
-              echo "::error::Found $CRITICAL critical severity vulnerabilities. Failing the build."
-              echo "🔍 Top Critical Vulnerabilities:"
-              cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") | "- \(.VulnerabilityID): \(.Title // "No title") (\(.Severity))"' | head -5
-              exit 1
-            fi
-            if [ "$HIGH" -gt "0" ]; then
-              echo "::warning::Found $HIGH high severity vulnerabilities."
-              echo "🔍 Top High Vulnerabilities:"
-              cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") | "- \(.VulnerabilityID): \(.Title // "No title") (\(.Severity))"' | head -5
-            fi
-            if [ "$CRITICAL" -eq "0" ] && [ "$HIGH" -eq "0" ]; then
-              echo "✅ No critical or high severity vulnerabilities found"
-            fi
-          else
-            echo "⚠️ JSON results not available, check table output above"
-          fi
-          echo ""
-          echo "📋 Security Scan Files Generated:"
-          ls -la trivy-results.* 2>/dev/null || echo "No scan result files found"
-      - name: Upload security scan artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: security-scan-results-${{ github.sha }}
-          path: |
-            trivy-results.json
-          retention-days: 30
-      - name: Test container
-        run: |
-          echo "🧪 Testing the built container..."
-          IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-          echo "🚀 Testing image: $IMAGE_NAME"
-          docker run -d --name test-container -p 8080:8080 $IMAGE_NAME
-          sleep 15
-          echo "🔍 Testing container health..."
-          if curl -f http://localhost:8080; then
-            echo "✅ Container health check passed"
-          else
-            echo "⚠️ Container health check failed, but continuing..."
-          fi
-          echo "📊 Container status:"
-          docker ps
-          echo "📋 Container logs:"
-          docker logs test-container
-          docker stop test-container
-      - name: Push Docker image
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-
-  deploy:
-    name: Deploy to Azure AKS
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: read
@@ -198,366 +89,10 @@ jobs:
         with:
           version: 'v1.28.0'
       - name: Get AKS credentials
+        run: az aks get-credentials --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER_NAME }}
+      - name: Deploy to AKS
         run: |
-          az aks get-credentials --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER_NAME }} --overwrite-existing
-      - name: Create namespace if not exists
-        run: |
-          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
-      - name: Update Kubernetes manifests
-        run: |
-          echo "🔄 Updating Kubernetes manifests with new image..."
-          sed -i "s|image: .*|image: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" k8s/deployment.yaml
-          echo "📋 Updated deployment manifest:"
-          grep "image:" k8s/deployment.yaml
-      - name: Deploy to Kubernetes
-        run: |
-          echo "🚀 Deploying to Kubernetes..."
-          if [ -f k8s/configmap.yaml ]; then
-            kubectl apply -f k8s/configmap.yaml -n ${{ env.NAMESPACE }}
-          fi
-          if [ -f k8s/secrets.yaml ]; then
-            kubectl apply -f k8s/secrets.yaml -n ${{ env.NAMESPACE }}
-          fi
-          kubectl apply -f k8s/rbac.yaml -n ${{ env.NAMESPACE }} || echo "RBAC already exists"
-          kubectl apply -f k8s/network-policy.yaml -n ${{ env.NAMESPACE }} || echo "Network policy applied"
-          kubectl apply -f k8s/deployment.yaml -n ${{ env.NAMESPACE }}
-          kubectl apply -f k8s/service.yaml -n ${{ env.NAMESPACE }}
-          if [ -f k8s/ingress.yaml ]; then
-            kubectl apply -f k8s/ingress.yaml -n ${{ env.NAMESPACE }}
-          fi
-          if [ -f k8s/hpa.yaml ]; then
-            kubectl apply -f k8s/hpa.yaml -n ${{ env.NAMESPACE }}
-          fi
-      - name: Verify deployment
-        run: |
-          echo "🔍 Verifying deployment..."
-          kubectl rollout status deployment/javascript-app -n ${{ env.NAMESPACE }} --timeout=300s
-          echo "📊 Deployment status:"
-          kubectl get deployments -n ${{ env.NAMESPACE }}
-          echo "📦 Pods status:"
-          kubectl get pods -n ${{ env.NAMESPACE }}
-          echo "🌐 Services:"
-          kubectl get services -n ${{ env.NAMESPACE }}
-          echo "🚪 Ingress:"
-          kubectl get ingress -n ${{ env.NAMESPACE }} || echo "No ingress found"
-      - name: Get application URL
-        run: |
-          echo "🌍 Application access information:"
-          echo "=================================="
-          EXTERNAL_IP=$(kubectl get service javascript-app-service -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
-          if [ "$EXTERNAL_IP" != "pending" ] && [ "$EXTERNAL_IP" != "" ]; then
-            echo "🔗 Application URL: http://$EXTERNAL_IP"
-          else
-            echo "⏳ External IP is pending. Use port-forward to access:"
-            echo "   kubectl port-forward service/javascript-app-service 8080:80 -n ${{ env.NAMESPACE }}"
-            echo "   Then access: http://localhost:8080"
-          fi
-      - name: Deployment summary
-        if: always()
-        run: |
-          echo "📋 Deployment Summary"
-          echo "===================="
-          echo "✅ Docker image built: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-          echo "✅ Security scan completed"
-          echo "✅ Container testing passed"
-          echo "✅ Image pushed to registry"
-          echo "✅ Deployed to AKS cluster: ${{ env.AKS_CLUSTER_NAME }}"
-          echo "✅ Namespace: ${{ env.NAMESPACE }}"
-          echo ""
-          echo "🎯 Next steps:"
-          echo "- Check the application URL above"
-          echo "- Monitor application logs: kubectl logs -f deployment/javascript-app -n ${{ env.NAMESPACE }}"
-          echo "- Scale if needed: kubectl scale deployment javascript-app --replicas=3 -n ${{ env.NAMESPACE }}"
-      - name: Cleanup on failure
-        if: failure()
-        run: |
-          echo "🧹 Cleaning up failed deployment..."
-          kubectl rollout undo deployment/javascript-app -n ${{ env.NAMESPACE }} || echo "No previous revision to rollback to"
-          echo "📊 Current status after cleanup:"
-          kubectl get pods -n ${{ env.NAMESPACE }}
-
-
-      - name: Process security scan results
-        if: always()
-        run: |
-          echo "🔍 Security Scan Results Summary"
-          echo "================================"
-          
-          # Check if JSON results exist and process them
-          if [ -f "trivy-results.json" ]; then
-            echo "📊 Vulnerability Statistics:"
-            
-            # Count vulnerabilities by severity
-            CRITICAL=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") | .VulnerabilityID' | wc -l || echo "0")
-            HIGH=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") | .VulnerabilityID' | wc -l || echo "0")
-            MEDIUM=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM") | .VulnerabilityID' | wc -l || echo "0")
-            LOW=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="LOW") | .VulnerabilityID' | wc -l || echo "0")
-            
-            echo "🔴 Critical: $CRITICAL"
-            echo "🟠 High: $HIGH"
-            echo "🟡 Medium: $MEDIUM"
-            echo "🟢 Low: $LOW"
-            
-            # Fail the build if critical vulnerabilities found
-            if [ "$CRITICAL" -gt "0" ]; then
-              echo "::error::Found $CRITICAL critical severity vulnerabilities. Failing the build."
-              echo "🔍 Top Critical Vulnerabilities:"
-              cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") | "- \(.VulnerabilityID): \(.Title // "No title") (\(.Severity))"' | head -5
-              exit 1
-            fi
-            # Warn if high vulnerabilities found
-            if [ "$HIGH" -gt "0" ]; then
-              echo "::warning::Found $HIGH high severity vulnerabilities."
-              echo "🔍 Top High Vulnerabilities:"
-              cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") | "- \(.VulnerabilityID): \(.Title // "No title") (\(.Severity))"' | head -5
-            fi
-            if [ "$CRITICAL" -eq "0" ] && [ "$HIGH" -eq "0" ]; then
-              echo "✅ No critical or high severity vulnerabilities found"
-            fi
-          else
-            echo "⚠️ JSON results not available, check table output above"
-          fi
-          
-          echo ""
-          echo "📋 Security Scan Files Generated:"
-          ls -la trivy-results.* 2>/dev/null || echo "No scan result files found"
-
-      - name: Upload security scan artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: security-scan-results-${{ github.sha }}
-          path: |
-            trivy-results.json
-            trivy-results.sarif
-          retention-days: 30
-
-      - name: Create security summary
-        if: always()
-        run: |
-          echo "## 🔒 Security Scan Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [ -f "trivy-results.json" ]; then
-            # Count vulnerabilities
-            CRITICAL=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") | .VulnerabilityID' | wc -l || echo "0")
-            HIGH=$(cat trivy-results.json | jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") | .VulnerabilityID' | wc -l || echo "0")
-            
-            echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
-            echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-            echo "| Critical | $CRITICAL |" >> $GITHUB_STEP_SUMMARY
-            echo "| High | $HIGH |" >> $GITHUB_STEP_SUMMARY
-            
-            if [ "$CRITICAL" -gt "0" ] || [ "$HIGH" -gt "0" ]; then
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "⚠️ **Action Required**: Critical or High severity vulnerabilities detected!" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "✅ **Security Status**: No critical or high severity vulnerabilities found" >> $GITHUB_STEP_SUMMARY
-            fi
-          else
-            echo "Security scan completed - check build logs for details" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      # =====================================
-      # CONTAINER TESTING
-      # =====================================
-      - name: Test container
-        run: |
-          echo "🧪 Testing the built container..."
-          
-          # Define the image name (lowercase)
-          IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-          echo "🚀 Testing image: $IMAGE_NAME"
-          
-          # Run the container in background
-          docker run -d --name test-container -p 8080:8080 $IMAGE_NAME
-          
-          # Wait for it to start
-          sleep 15
-          
-          # Test if it's responding
-          echo "🔍 Testing container health..."
-          if curl -f http://localhost:8080; then
-            echo "✅ Container health check passed"
-          else
-            echo "⚠️ Container health check failed, but continuing..."
-          fi
-          
-          # Show container status
-          echo "📊 Container status:"
-          docker ps
-          
-          # Show container logs
-          echo "📋 Container logs:"
-          docker logs test-container
-          
-          # Stop container
-          docker stop test-container
-
-      # =====================================
-      # PUSH TO REGISTRY
-      # =====================================
-      - name: Push Docker image
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-
-      # =====================================
-      # KUBERNETES DEPLOYMENT PREPARATION
-      # =====================================
-      - name: Set up kubectl
-        if: github.ref == 'refs/heads/main'
-        uses: azure/setup-kubectl@v3
-        with:
-          version: 'v1.28.0'
-
-      - name: Get AKS credentials
-        if: github.ref == 'refs/heads/main'
-        run: |
-          az aks get-credentials --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER_NAME }} --overwrite-existing
-
-      - name: Create namespace if not exists
-        if: github.ref == 'refs/heads/main'
-        run: |
-          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
-
-      # =====================================
-      # KUBERNETES DEPLOYMENT
-      # =====================================
-      - name: Update Kubernetes manifests
-        if: github.ref == 'refs/heads/main'
-        run: |
-          echo "🔄 Updating Kubernetes manifests with new image..."
-          
-          # Update image in deployment manifest
-          sed -i "s|image: .*|image: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" k8s/deployment.yaml
-          
-          # Verify the update
-          echo "📋 Updated deployment manifest:"
-          grep "image:" k8s/deployment.yaml
-
-      - name: Deploy to Kubernetes
-        if: github.ref == 'refs/heads/main'
-        run: |
-          echo "🚀 Deploying to Kubernetes..."
-          
-          # Apply ConfigMap and Secrets first
-          if [ -f k8s/configmap.yaml ]; then
-            kubectl apply -f k8s/configmap.yaml -n ${{ env.NAMESPACE }}
-          fi
-          
-          if [ -f k8s/secrets.yaml ]; then
-            kubectl apply -f k8s/secrets.yaml -n ${{ env.NAMESPACE }}
-          fi
-          
-          # Apply RBAC
-          kubectl apply -f k8s/rbac.yaml -n ${{ env.NAMESPACE }} || echo "RBAC already exists"
-          
-          # Apply Network Policy
-          kubectl apply -f k8s/network-policy.yaml -n ${{ env.NAMESPACE }} || echo "Network policy applied"
-          
-          # Apply Deployment
-          kubectl apply -f k8s/deployment.yaml -n ${{ env.NAMESPACE }}
-          
-          # Apply Service
-          kubectl apply -f k8s/service.yaml -n ${{ env.NAMESPACE }}
-          
-          # Apply Ingress
-          if [ -f k8s/ingress.yaml ]; then
-            kubectl apply -f k8s/ingress.yaml -n ${{ env.NAMESPACE }}
-          fi
-          
-          # Apply HPA
-          if [ -f k8s/hpa.yaml ]; then
-            kubectl apply -f k8s/hpa.yaml -n ${{ env.NAMESPACE }}
-          fi
-
-      # =====================================
-      # DEPLOYMENT VERIFICATION
-      # =====================================
-      - name: Verify deployment
-        if: github.ref == 'refs/heads/main'
-        run: |
-          echo "🔍 Verifying deployment..."
-          
-          # Wait for deployment to be ready
-          kubectl rollout status deployment/javascript-app -n ${{ env.NAMESPACE }} --timeout=300s
-          
-          # Get deployment status
-          echo "📊 Deployment status:"
-          kubectl get deployments -n ${{ env.NAMESPACE }}
-          
-          # Get pods status
-          echo "📦 Pods status:"
-          kubectl get pods -n ${{ env.NAMESPACE }}
-          
-          # Get services
-          echo "🌐 Services:"
-          kubectl get services -n ${{ env.NAMESPACE }}
-          
-          # Get ingress (if exists)
-          echo "🚪 Ingress:"
-          kubectl get ingress -n ${{ env.NAMESPACE }} || echo "No ingress found"
-
-      - name: Get application URL
-        if: github.ref == 'refs/heads/main'
-        run: |
-          echo "🌍 Application access information:"
-          echo "=================================="
-          
-          # Get LoadBalancer IP if available
-          EXTERNAL_IP=$(kubectl get service javascript-app-service -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
-          
-          if [ "$EXTERNAL_IP" != "pending" ] && [ "$EXTERNAL_IP" != "" ]; then
-            echo "🔗 Application URL: http://$EXTERNAL_IP"
-          else
-            echo "⏳ External IP is pending. Use port-forward to access:"
-            echo "   kubectl port-forward service/javascript-app-service 8080:80 -n ${{ env.NAMESPACE }}"
-            echo "   Then access: http://localhost:8080"
-          fi
-
-      # =====================================
-      # DEPLOYMENT SUMMARY
-      # =====================================
-      - name: Deployment summary
-        if: always()
-        run: |
-          echo "📋 Deployment Summary"
-          echo "===================="
-          echo "✅ Docker image built: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-          echo "✅ Security scan completed"
-          echo "✅ Container testing passed"
-          
-          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
-            echo "✅ Image pushed to registry"
-            echo "✅ Deployed to AKS cluster: ${{ env.AKS_CLUSTER_NAME }}"
-            echo "✅ Namespace: ${{ env.NAMESPACE }}"
-          else
-            echo "ℹ️  Deployment skipped (not main branch)"
-          fi
-          
-          echo ""
-          echo "🎯 Next steps:"
-          echo "- Check the application URL above"
-          echo "- Monitor application logs: kubectl logs -f deployment/javascript-app -n ${{ env.NAMESPACE }}"
-          echo "- Scale if needed: kubectl scale deployment javascript-app --replicas=3 -n ${{ env.NAMESPACE }}"
-
-      # =====================================
-      # CLEANUP ON FAILURE
-      # =====================================
-      - name: Cleanup on failure
-        if: failure() && github.ref == 'refs/heads/main'
-        run: |
-          echo "🧹 Cleaning up failed deployment..."
-          kubectl rollout undo deployment/javascript-app -n ${{ env.NAMESPACE }} || echo "No previous revision to rollback to"
-          
-          echo "📊 Current status after cleanup:"
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl rollout status deployment/javascript-app-deployment
           kubectl get pods -n ${{ env.NAMESPACE }}
