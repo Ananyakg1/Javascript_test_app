@@ -2,7 +2,7 @@ name: Build and Deploy to Azure AKS
 
 
 jobs:
-  build:
+  build: 
     name: Build, Scan, and Test Docker Image
     runs-on: ubuntu-latest
     env:
