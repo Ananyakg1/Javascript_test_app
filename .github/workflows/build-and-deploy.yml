@@ -142,6 +142,11 @@ jobs:
       - name: Update image in Kubernetes manifests
         run: |
           IMAGE_TO_USE="${{ needs.build.outputs.image-full }}"
+          echo "IMAGE_TO_USE is: $IMAGE_TO_USE"
+          if [ -z "$IMAGE_TO_USE" ]; then
+            echo "ERROR: IMAGE_TO_USE is empty. Failing early."
+            exit 1
+          fi
           find k8s/ -name "*.yaml" -type f -exec sed -i "s|javascript-app:latest|$IMAGE_TO_USE|g" {} \;
       - name: Cleanup deleted k8s manifests (if present)
         run: |
