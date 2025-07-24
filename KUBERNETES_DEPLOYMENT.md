@@ -42,10 +42,7 @@ k8s/
 ├── deployment.yaml         # Main application deployment
 ├── service.yaml            # Service definitions (ClusterIP, headless, internal)
 ├── network-policy.yaml     # Network security policies
-├── policies.yaml           # PodDisruptionBudget, HPA, PodSecurityPolicy
 ├── ingress.yaml            # Ingress with TLS and security headers
-├── monitoring.yaml         # Prometheus monitoring and alerting
-└── kustomization.yaml      # Kustomize configuration
 ```
 
 ## 🔒 Security Features
