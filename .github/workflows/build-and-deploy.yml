@@ -1,98 +1,146 @@
-name: Build and Deploy to Azure AKS
+name: Build, Scan, and Deploy React App to AKS
+
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '18'
+  IMAGE_NAME: javascript-app
+  NAMESPACE: javascript-namespace
+  DEPLOYMENT_NAME: javascript-app-deployment
 
 jobs:
-  build: 
-    name: Build, Scan, and Test Docker Image
+  build:
+    name: Build and Security Scan
     runs-on: ubuntu-latest
-    env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: javascript-app
-      AZURE_RESOURCE_GROUP: javascript-rg
-      AKS_CLUSTER_NAME: javascript-aks
-      NAMESPACE: javascript-namespace
+    outputs:
+      image-tag: ${{ steps.build-info.outputs.image-tag }}
+      image-full: ${{ steps.build-info.outputs.image-full }}
+      build-id: ${{ steps.build-info.outputs.build-id }}
     permissions:
       contents: read
+      security-events: write
       packages: write
       actions: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Generate Build Information
+        id: build-info
+        run: |
+          BUILD_ID="${GITHUB_RUN_NUMBER}-$(date +%Y%m%d%H%M%S)-${GITHUB_SHA::8}"
+          IMAGE_TAG="$BUILD_ID"
+          IMAGE_FULL="${{ secrets.REGISTRY_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG"
+          echo "build-id=$BUILD_ID" >> $GITHUB_OUTPUT
+          echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "image-full=$IMAGE_FULL" >> $GITHUB_OUTPUT
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build React app
+        run: npm run build
+      - name: Login to Azure Container Registry
+        run: az acr login --name "${{ secrets.REGISTRY_LOGIN_SERVER }}"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
+          version: latest
+          driver-opts: network=host
+      - name: Build and Push Docker Image
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --tag "${{ steps.build-info.outputs.image-full }}" \
+            --tag "${{ secrets.REGISTRY_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest" \
+            --push \
+            --file Dockerfile \
+            .
+      - name: Run Trivy Security Scan (Table Format)
+        uses: aquasecurity/trivy-action@0.28.0
+        continue-on-error: true
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
+          image-ref: ${{ steps.build-info.outputs.image-full }}
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+          timeout: '10m'
+      - name: Run Trivy Security Scan (SARIF for GitHub Security)
+        uses: aquasecurity/trivy-action@0.28.0
+        continue-on-error: true
         with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
-          push: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-      - name: Scan Docker image for vulnerabilities
-        uses: aquasecurity/trivy-action@v0.20.0
+          image-ref: ${{ steps.build-info.outputs.image-full }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+          timeout: '10m'
+      - name: Upload Trivy Scan Results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('trivy-results.sarif') != ''
         with:
-          image-ref: ${{ steps.meta.outputs.tags }}
-          format: table
-          exit-code: 0
-      - name: Push Docker image
-        uses: docker/build-push-action@v5
+          sarif_file: 'trivy-results.sarif'
+          category: 'trivy'
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          name: build-artifacts-${{ steps.build-info.outputs.build-id }}
+          path: build/
+          retention-days: 7
 
   deploy:
-    name: Deploy to Azure AKS
+    name: Deploy to AKS
     runs-on: ubuntu-latest
     needs: build
-    if: github.ref == 'refs/heads/main'
-    env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: javascript-app
-      AZURE_RESOURCE_GROUP: javascript-rg
-      AKS_CLUSTER_NAME: javascript-aks
-      NAMESPACE: javascript-namespace
+    if: always() && github.ref == 'refs/heads/main'
+    environment:
+      name: production
     permissions:
       contents: read
-      packages: read
       actions: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Azure Login
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: 'v1.28.0'
-      - name: Get AKS credentials
-        run: az aks get-credentials --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER_NAME }}
+      - name: Install Azure CLI and Kubernetes tools
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      - name: Login to Azure
+        run: |
+          az login --service-principal \
+            --username "${{ secrets.AZURE_CLIENT_ID }}" \
+            --password "${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}"
+          az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+      - name: Get AKS Credentials
+        run: |
+          az aks get-credentials \
+            --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" \
+            --name "${{ secrets.AKS_CLUSTER_NAME }}" \
+            --overwrite-existing
+      - name: Update image in Kubernetes manifests
+        run: |
+          IMAGE_TO_USE="${{ needs.build.outputs.image-full }}"
+          find k8s/ -name "*.yaml" -type f -exec sed -i "s|javascript-app:latest|$IMAGE_TO_USE|g" {} \;
       - name: Deploy to AKS
         run: |
-          kubectl apply -f k8s/deployment.yaml
-          kubectl apply -f k8s/service.yaml
-          kubectl rollout status deployment/javascript-app-deployment
-          kubectl get pods -n ${{ env.NAMESPACE }}
+          kubectl apply -f k8s/
+          kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n ${NAMESPACE} --timeout=120s
+      - name: Post-deployment checks
+        run: |
+          kubectl get pods -n ${NAMESPACE}
+          kubectl get services -n ${NAMESPACE}
