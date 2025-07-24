@@ -143,6 +143,9 @@ jobs:
         run: |
           IMAGE_TO_USE="${{ needs.build.outputs.image-full }}"
           find k8s/ -name "*.yaml" -type f -exec sed -i "s|javascript-app:latest|$IMAGE_TO_USE|g" {} \;
+      - name: Cleanup deleted k8s manifests (if present)
+        run: |
+          rm -f k8s/kustomization.yaml k8s/monitoring.yaml k8s/policies.yaml
       - name: List k8s directory contents
         run: ls -l k8s/
       - name: Deploy to AKS
