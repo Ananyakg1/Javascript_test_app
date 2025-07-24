@@ -66,17 +66,7 @@ spec:
                   - javascript-app
               topologyKey: kubernetes.io/hostname
       
-      # Node selector for production nodes
-      nodeSelector:
-        kubernetes.io/os: linux
-        node-type: production
-      
-      # Tolerations (if needed)
-      tolerations:
-      - key: "production"
-        operator: "Equal"
-        value: "true"
-        effect: "NoSchedule"
+
       
       # DNS configuration
       dnsPolicy: ClusterFirst
