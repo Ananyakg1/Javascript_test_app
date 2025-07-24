@@ -2,6 +2,12 @@
 name: Security Setup and Configuration
 
 on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
   schedule:
     # Run weekly on Sundays at 2 AM UTC
