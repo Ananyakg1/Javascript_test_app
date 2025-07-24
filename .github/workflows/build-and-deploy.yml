@@ -143,6 +143,8 @@ jobs:
         run: |
           IMAGE_TO_USE="${{ needs.build.outputs.image-full }}"
           find k8s/ -name "*.yaml" -type f -exec sed -i "s|javascript-app:latest|$IMAGE_TO_USE|g" {} \;
+      - name: List k8s directory contents
+        run: ls -l k8s/
       - name: Deploy to AKS
         run: |
           kubectl apply -f k8s/
