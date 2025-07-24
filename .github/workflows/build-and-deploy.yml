@@ -166,18 +166,6 @@ jobs:
         run: |
           kubectl apply -f k8s/
           kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n ${NAMESPACE} --timeout=120s
-      - name: Print pod status and logs if rollout fails
-        if: failure()
-        run: |
-          echo "\n==== POD STATUS ===="
-          kubectl get pods -n ${NAMESPACE}
-          echo "\n==== POD DESCRIBE (first 3 pods) ===="
-          for pod in $(kubectl get pods -n ${NAMESPACE} -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | head -n 3); do
-            echo "\n--- Describe for $pod ---"
-            kubectl describe pod $pod -n ${NAMESPACE}
-            echo "\n--- Logs for $pod ---"
-            kubectl logs $pod -n ${NAMESPACE} --tail=50 || true
-          done
       - name: Post-deployment checks
         run: |
           kubectl get pods -n ${NAMESPACE}
