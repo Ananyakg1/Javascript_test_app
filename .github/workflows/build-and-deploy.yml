@@ -49,7 +49,7 @@ jobs:
       - name: Scan Docker image for vulnerabilities
         uses: aquasecurity/trivy-action@v0.13.1
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          image-ref: ${{ steps.meta.outputs.tags }}
           format: table
           exit-code: 0
       - name: Push Docker image
