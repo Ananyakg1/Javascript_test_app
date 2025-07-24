@@ -78,7 +78,7 @@ spec:
       
       containers:
       - name: javascript-app
-        image: IMAGE_PLACEHOLDER
+        image: javascript-app:latest
         imagePullPolicy: Always
         
         # Security context for the container
