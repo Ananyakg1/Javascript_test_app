@@ -1,3 +1,4 @@
+# Trigger re-index for GitHub Actions
 name: Security Setup and Configuration
 
 on:
