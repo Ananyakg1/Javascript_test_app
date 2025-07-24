@@ -18,9 +18,9 @@ jobs:
     name: Build and Security Scan
     runs-on: ubuntu-latest
     outputs:
-      image-tag: ${{ steps.build-info.outputs.image-tag }}
-      image-full: ${{ steps.build-info.outputs.image-full }}
-      build-id: ${{ steps.build-info.outputs.build-id }}
+      image-tag: ${{ steps.set-outputs.outputs.image-tag }}
+      image-full: ${{ steps.set-outputs.outputs.image-full }}
+      build-id: ${{ steps.set-outputs.outputs.build-id }}
     permissions:
       contents: read
       security-events: write
@@ -32,14 +32,14 @@ jobs:
         with:
           fetch-depth: 0
       - name: Generate Build Information
-        id: build-info
+        id: set-outputs
         run: |
           BUILD_ID="${GITHUB_RUN_NUMBER}-$(date +%Y%m%d%H%M%S)-${GITHUB_SHA::8}"
           IMAGE_TAG="$BUILD_ID"
           IMAGE_FULL="${{ secrets.REGISTRY_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:$IMAGE_TAG"
-          echo "build-id=$BUILD_ID" >> $GITHUB_OUTPUT
           echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
           echo "image-full=$IMAGE_FULL" >> $GITHUB_OUTPUT
+          echo "build-id=$BUILD_ID" >> $GITHUB_OUTPUT
           echo "DEBUG: IMAGE_TAG is $IMAGE_TAG"
           echo "DEBUG: IMAGE_FULL is $IMAGE_FULL"
       - name: Set up Node.js ${{ env.NODE_VERSION }}
@@ -69,7 +69,7 @@ jobs:
         run: |
           docker buildx build \
             --platform linux/amd64 \
-            --tag "${{ steps.build-info.outputs.image-full }}" \
+            --tag "${{ steps.set-outputs.outputs.image-full }}" \
             --tag "${{ secrets.REGISTRY_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest" \
             --push \
             --file Dockerfile \
@@ -78,7 +78,7 @@ jobs:
         uses: aquasecurity/trivy-action@0.28.0
         continue-on-error: true
         with:
-          image-ref: ${{ steps.build-info.outputs.image-full }}
+          image-ref: ${{ steps.set-outputs.outputs.image-full }}
           format: 'table'
           exit-code: '0'
           ignore-unfixed: true
@@ -89,7 +89,7 @@ jobs:
         uses: aquasecurity/trivy-action@0.28.0
         continue-on-error: true
         with:
-          image-ref: ${{ steps.build-info.outputs.image-full }}
+          image-ref: ${{ steps.set-outputs.outputs.image-full }}
           format: 'sarif'
           output: 'trivy-results.sarif'
           ignore-unfixed: true
@@ -105,7 +105,7 @@ jobs:
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-artifacts-${{ steps.build-info.outputs.build-id }}
+          name: build-artifacts-${{ steps.set-outputs.outputs.build-id }}
           path: build/
           retention-days: 7
 
