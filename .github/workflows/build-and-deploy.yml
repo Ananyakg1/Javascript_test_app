@@ -2,7 +2,7 @@ name: Build, Scan, and Deploy React App to AKS
 
 on:
   push:
-    branches: [main] 
+    branches: [main]  
   pull_request: 
     branches: [main]
   workflow_dispatch:
